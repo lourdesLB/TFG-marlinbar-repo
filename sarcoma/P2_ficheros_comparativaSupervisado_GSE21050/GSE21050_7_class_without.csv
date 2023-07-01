@@ -1,0 +1,7 @@
+,Best params,Best score
+LR,"{'LR__C': 1, 'LR__penalty': 'l1', 'LR__solver': 'liblinear'}",0.7293178519593614
+KNN,"{'KNN__metric': 'euclidean', 'KNN__n_neighbors': 6, 'KNN__weights': 'uniform'}",0.7253991291727141
+SVC,"{'SVC__C': 1000, 'SVC__gamma': 0.001, 'SVC__kernel': 'sigmoid'}",0.7066037735849057
+NuSVC,"{'NuSVC__gamma': 0.001, 'NuSVC__kernel': 'sigmoid', 'NuSVC__nu': 0.1}",0.7141509433962264
+RF,"{'RF__max_depth': 20, 'RF__n_estimators': 20}",0.7136429608127721
+XGB,"{'XGB__learning_rate': 0.3, 'XGB__max_depth': 5, 'XGB__n_estimators': 10}",0.6562341796917799

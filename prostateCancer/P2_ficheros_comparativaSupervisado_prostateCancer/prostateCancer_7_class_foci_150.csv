@@ -1,0 +1,7 @@
+,Best params,Best score
+LR,"{'penalty': 'l1', 'C': 1, 'solver': 'liblinear'}",0.8783175888439047
+KNN,"{'n_neighbors': 20, 'weights': 'uniform', 'metric': 'manhattan'}",0.8693207377417904
+SVC,"{'kernel': 'rbf', 'C': 100, 'gamma': 0.001}",0.8780926675663518
+NuSVC,"{'kernel': 'rbf', 'gamma': 0.1, 'nu': 0.5}",0.8693207377417904
+RF,"{'n_estimators': 5, 'max_depth': 5}",0.860548807917229
+XGB,"{'n_estimators': 20, 'max_depth': 5, 'learning_rate': 0.3}",0.8346828609986505
