@@ -1,0 +1,334 @@
+---
+title: "Aprendizaje no supervisado: Detección de biomarcadores (FOCI) y redes de interacción (reglas de asociación)"
+author: "María Lourdes Linares Barrera"
+fig.width: 6
+fig.height: 4
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+___
+
+# Configuración de variables de script y directorio de trabajo
+
+
+Establecemos como directorio de trabajo (workspace) el directorio en el que se encuentra el fichero.
+
+```{r, results='hide', warning=FALSE, message=FALSE}
+library(rstudioapi)
+
+workspace_path <- rstudioapi::getActiveDocumentContext()$path 
+setwd(dirname(workspace_path))
+
+print( paste("Workspace:",getwd()) )
+```
+
+Configuramos las variables del script para el conjunto de datos.
+```{r}
+# Caracteristicas de los datos
+
+dataset_name <- "GSE21050"      # conjunto de datos
+not_gene_columns <- c("group","time_survivor")  # columnas que no son genes 
+groupv0 <- "metastasis:no"      # valores codificados como 0 y 1 en la clasificacion (diagnostico)
+groupv1 <- "metastasis:yes"
+n_cores <- 7
+dataset_files_folder_preprocessing <-
+  paste0("P1_ficheros_preprocesamiento_",dataset_name,"/")
+dataset_files_folder_unsupervised <-
+  paste0("P3_ficheros_aprendizajeNoSupervisado_",dataset_name,"/")
+```
+
+```{r}
+# Parametros de configuracion de los algoritmos
+
+# FOCI
+num_genes <- 180                      # numero de biomarcadores a extraer
+n_cores <- 7                         # nucleos para paralelizacion
+
+# Reglas
+min_supp <- 0.1
+min_conf <- 0.914
+min_lift <- 1
+maxlen_rules <- 7
+maxtime_rules <- 60
+antecedente_extra <- c()
+confidence_filter <- 1
+
+criterion_sort_rules <- c("confidence","support")
+```
+
+
+```{r}
+# Parametros de configuracion de los graficos
+
+nmax_boxplot <- 50
+num_genes_selected <- 65
+
+```
+
+
+
+___
+
+# Importación de paquetes
+
+Importamos los paquetes necesarios.
+
+
+```{r, results='hide', warning=FALSE, message=FALSE}
+library(tidyverse)
+library(dplyr)
+library(FOCI)
+library(ggplot2)
+library(arules)
+library(arulesViz)
+library(igraph)
+```
+
+
+
+___
+
+# Extracción de genes con FOCI
+
+
+```{r, message=FALSE} 
+dataset <- read_csv(paste0(dataset_files_folder_preprocessing,
+                           dataset_name,"_6_diffexp.csv"), 
+                    show_col_types = FALSE
+                    )
+gene_matrix <- dataset[,-which(names(dataset) %in% not_gene_columns)]
+
+# Previsualizacion de las primeras filas y columnas (4x4) del conjunto de datos en intensidades log2
+print(head(dataset[,1:4], n=4), digits = 2, right = TRUE, numb = 4)
+```
+
+```{r, eval=FALSE}
+# Ejecutar FOCI para extraer los genes relevantes
+resfoci <- foci(dataset$group, 
+                gene_matrix, 
+                stop=FALSE, numCores=n_cores, 
+                num_features=num_genes)
+
+# Almacenar los resultados en una variable externa y un fichero
+save(resfoci, 
+     file=paste0(dataset_files_folder_unsupervised,
+                 dataset_name,"_9_foci.RData")
+     )
+write.csv(resfoci$selectedVar$names, 
+          file=paste0(dataset_files_folder_unsupervised,
+                      dataset_name,"_9_resfoci_vars.csv"), 
+          row.names = FALSE)
+
+write.csv(resfoci$stepT, 
+          file=paste0(dataset_files_folder_unsupervised,
+                      dataset_name,"_9_resfoci_Tvalues.csv"))
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+load(paste0(dataset_files_folder_unsupervised,
+            dataset_name,"_9_resfoci.RData"))
+
+# Mostramos la evolucion del estadistico de dependencia en funcion del numero de atributos
+foci_evolucion <- data.frame(
+  num_genes = 1:num_genes,
+  Tvalue = resfoci$stepT[1:num_genes]
+)
+
+xline <- num_genes_selected
+yline <- foci_evolucion[num_genes_selected, "Tvalue"]
+
+ggplot(foci_evolucion, 
+       aes(x =num_genes, y = Tvalue),
+       main=paste0(dataset_name,"- FOCI T statistic evolution")) +
+  geom_vline(aes(xintercept = xline), linetype = "dashed") +
+  geom_hline(aes(yintercept = yline), linetype = "dashed") +
+  geom_smooth(method = "loess", se = FALSE, span = 0.1) +
+  ggtitle(paste0(dataset_name,"- FOCI Tstatistic evolution")) +
+  theme(plot.title.position = "plot", plot.title = element_text(hjust = 0.5))+
+  scale_x_continuous(breaks = seq(min(foci_evolucion$num_genes), max(foci_evolucion$num_genes), by = 10)) +
+  scale_y_continuous(breaks = seq(min(foci_evolucion$Tvalue), max(foci_evolucion$Tvalue), by = 0.02))
+
+
+# En vista del gráfico seleccionamos como variables de interés los primeros 93 genes 
+# (que es donde podemos visualizar un pico para un numero considerable de genes)
+
+```
+
+```{r}
+# Mostramos el listado de genes relevantes
+resfoci_genes <- resfoci$selectedVar$names[1:num_genes_selected]
+resfoci_genes
+```
+
+___
+
+# Redes de co-expresión
+Podemos cargar el listado de genes en GeneMANIA y obtenemos el siguiente grafo.
+
+```{r}
+knitr::include_graphics(paste0(dataset_files_folder_unsupervised,
+                               dataset_name,"_9_genemania.jpg")
+                        )
+```
+
+
+___
+
+# Buscamos redes de interacción entre las características
+
+Para discretizar los valores debemos de tener en cuenta como se distribuyen los valores de expresión de los distintos genes. Si son muy dispares utilizaremos una discretización basada en la mediana, si no podremos utilizar un umbral estático.
+
+```{r, warning=FALSE, message=FALSE}
+# Boxplot: distribuciones de cuantiles de las intensidades de gen
+
+boxplot(cbind(gene_matrix[,resfoci_genes])[,1:nmax_boxplot],
+        boxwex=0.7, notch=T, 
+        main=paste(dataset_name, "- Boxplot distribution"), 
+        ylab = "intensity",
+        outline=FALSE, las=2)
+
+
+```
+
+```{r, warning=FALSE, message=FALSE}
+# Scatterplot: intensidades de gen utilizando gráfico de puntos
+
+gene_matrix_melt <- melt(gene_matrix[,resfoci_genes][,1:nmax_boxplot])
+  
+ggplot(gene_matrix_melt, 
+       aes(x=variable, y=value)) + 
+  geom_point() +
+  ggtitle(paste0(dataset_name, "- Scatterplot distribution")) +
+  theme(plot.title.position = "plot", plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)
+        )
+
+
+```
+
+Conversión del conjunto de datos a transacciones.
+
+```{r, warning=FALSE}
+# El valor de un gen se considerara alto si esta por encima de su mediana y bajo en caso contrario
+
+dataset_discretizado <- gene_matrix[,resfoci_genes]
+
+dataset_discretizado <- apply(dataset_discretizado, 2, 
+                              function(x) ifelse(x < median(x, na.rm = TRUE), "bajo", "alto"))
+dataset_discretizado <- cbind(
+  group=ifelse(dataset$group == 0, groupv0, groupv1),
+  dataset_discretizado
+  )
+dataset_discretizado <- as.data.frame(apply(dataset_discretizado, 2, as.factor))
+
+rownames(dataset_discretizado) <- paste0("Transaction-", c(1:nrow(dataset_discretizado)))
+
+transactions_dataset <- transactions(dataset_discretizado)
+```
+
+
+
+El patrón de reglas en el que estamos interesados es aquel en el que consecuente son los genes (con su nivel de expresión) y el consecuente es la presencia de tumor (group=tumor).
+
+
+```{r}
+antecedente <- c(paste0(resfoci_genes,"=alto"), paste0(resfoci_genes,"=bajo"))
+consecuente <- c(paste0("group=",groupv1))
+
+apariencia <- list(
+    lhs = antecedente,
+    rhs = consecuente
+)
+```
+
+
+Ajustamos los parámetros de interés de las reglas:
+- Soporte mínimo. El soporte mide el número de muestras que satisfacen la regla. Exigiremos un soporte superior a 0.25 para garantizar que las reglas cubren un cierto número de ejemplos (y evitar sobreajuste).
+- Confianza. La confianza representa la tasa de aciertos de la regla. En nuestro caso nos interesa garantizar que las reglas sean fiables, por lo que estableceremos la confianza a 1.
+- Lift. Este parámetro mide el grado de dependencia entre las variables del antecedente y el consecuente. Si la relación es baja, la regla es poco informativa. Valores de lift superiores a 1 indican que antecedente y consecuente ocurren juntos más de lo esperado y que, por lo tanto, la regla es bastante informativa. Estableceremos un valor de lift superior a 1.7.
+
+```{r, warning=FALSE, message=FALSE}
+# Obtencion de reglas con los parametros indicados
+
+reglas <- apriori(transactions_dataset, parameter = list(
+  supp = min_supp,
+  conf = 0.914,
+  maxlen = 7,
+  maxtime= 60
+  ),
+  appearance = apariencia
+)
+reglas_mejores <- subset(reglas, subset = lift > min_lift)
+```
+
+
+
+```{r}
+# Eliminación de reglas redundantes
+elimina_redundantes <- function(reglas) {
+  
+  indices_no_redundantes <- c()
+  
+  for (i in 1:(length(reglas)-1)) {
+    es_redundante <- FALSE
+    
+    antecedente_i <- LIST(lhs(reglas[i]))[[1]]
+    
+    for (j in (i+1):length(reglas)) {
+      
+      antecedente_j <- LIST(lhs(reglas[j]))[[1]]
+
+      if (all(antecedente_i %in% antecedente_j)) {
+        es_redundante <- TRUE
+        break
+      }
+    }
+    
+    if (!es_redundante) {
+      indices_no_redundantes <- c(indices_no_redundantes, i)
+    }
+  }
+  return(reglas[indices_no_redundantes])
+}
+
+reglas_no_redundantes <- elimina_redundantes(reglas_mejores)
+
+# Ordenación de reglas y visualización
+reglas_ordenadas <- sort(reglas_no_redundantes, by=criterion_sort_rules, decreasing=c(TRUE, TRUE))
+inspectDT(reglas_ordenadas)
+```
+
+
+```{r, results='hide', warning=FALSE, message=FALSE}
+# Guardar los resultados
+save(reglas_ordenadas, file=paste0(dataset_files_folder_unsupervised,
+                                   dataset_name,"_9_reglas.RData"))
+
+file_reglas <- file(paste0(dataset_files_folder_unsupervised,
+                           dataset_name,"_9_reglas.txt"), 
+                    open = "w")
+write(reglas_ordenadas, file = file_reglas)
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+# Representación de resultados
+
+plot(reglas_ordenadas, method = "graph")
+```
+
+
+```{r}
+
+plot(reglas_ordenadas, method = "graph", engine = "html")
+
+```
+
+
+
