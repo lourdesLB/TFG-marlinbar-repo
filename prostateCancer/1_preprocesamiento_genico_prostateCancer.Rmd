@@ -1,0 +1,594 @@
+---
+title: "Preprocesamiento del dataset de tumor prostático"
+author: "María Lourdes Linares Barrera"
+fig.width: 6
+fig.height: 4
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+___
+
+# Configuración de variables de script y directorio de trabajo
+
+
+Establecemos como directorio de trabajo (workspace) el directorio en el que se encuentra el fichero.
+
+```{r, results='hide', warning=FALSE, message=FALSE}
+library(rstudioapi)
+
+workspace_path <- rstudioapi::getActiveDocumentContext()$path 
+setwd(dirname(workspace_path))
+
+print( paste("Workspace:",getwd()) )
+```
+
+Configuramos las variables del script para el conjunto de datos.
+```{r}
+# Caracteristicas de los datos
+
+dataset_name <- "prostateCancer"      # conjunto de datos
+microarray_platform <- "hgu95av2.db"  # plataforma de microarray (para sumarizacion)
+not_gene_columns <- c("group")           # columas que no son sondas
+
+# Acciones a realizar
+do_log2 <- "NO"   # Estos datos ya se encuentran en intensidades log2
+do_norm <- "YES"  # Estos datos presentan una variabilidad experimental muy alta
+
+# Carpeta donde almacenar ficheros y logs 
+dataset_files_folder_extraction <- 
+  paste0("P0_ficheros_extraccion_",dataset_name,"/")
+
+dataset_files_folder_preprocessing <-
+  paste0("P1_ficheros_preprocesamiento_",dataset_name,"/")
+
+```
+
+```{r}
+# Parametros de configuracion de los graficos
+
+# Bloxplot
+nmax_boxplot <- 50
+
+# Intensity plot
+log2_xlim_before <- c(-100,100)
+log2_ylim_before <- c(0,0.1)
+log2_xlim_after <- c(-50,100)
+log2_ylim_after <- c(0,0.01)
+
+# Volcanoplot
+volcano_legend <- "topleft"
+volcano_cex <- 0.5
+volcano_xlim <- c(-200,200)
+volcano_ylim <- c(0,15)
+
+# MDplot
+md_legend <- "topleft"
+md_cex <- 0.5
+md_xlim <- c(-50,500)
+md_ylim <- c(-500,700)
+
+# UMAP plot, nombre de las clases etiquetadas como 0 y 1
+umap_cex <- 1.2
+umap_legend <- "topright"
+groupv0 <- "Normal"         # nombre de las clasess etiquetadas como 0 y 1
+groupv1 <- "Tumor"
+```
+
+
+
+___
+
+# Importación de paquetes
+
+Importamos los paquetes necesarios para el tratamiento de los dataframes, la carga de la base de datos ómica y el preprocesamiento génico de los datos.
+
+
+```{r, results='hide', warning=FALSE, message=FALSE}
+library(tidyverse)
+library(dplyr)
+
+
+library(GEOquery)
+library(limma)
+library(preprocessCore)
+do.call("library", list(microarray_platform))
+library(umap)
+```
+
+
+
+___
+
+# Extracción de datos
+
+Llamamos al script de extracción del conjunto de datos.
+
+```{r} 
+script_extraccion <- sprintf("./0_extraccion_datos_%s.R", dataset_name)
+source(script_extraccion)
+
+
+dataset1 <- read_csv(paste0(dataset_files_folder_extraction,
+                            dataset_name,"_1_notnulldata.csv"), show_col_types = FALSE)
+gene_matrix1 <- dataset1[ , -which(names(dataset1) %in% not_gene_columns)]
+not_gene_data1 <- dataset1[ ,c(not_gene_columns)]
+```
+
+
+
+
+___
+
+# Intensidades log2
+
+En datos ómicos de microarray, es habitual transformar los datos a escala logarítmica ya que facilita la comparación entre distintos experimentos o fuentes de datos al situar los datos en una escala común. No siempre es necesario aplicar este paso ya que, en muchas ocasiones, se proporcionan ya los datos en escala logarítmica.
+
+```{r}
+# Conversion a intensidades log2
+
+if (do_log2=="YES"){
+  
+  qx <- as.numeric(quantile(t(gene_matrix1), c(0., 0.25, 0.5, 0.75, 0.99, 1.0), na.rm=T))
+  LogC <- (qx[5] > 100) || (qx[6]-qx[1] > 50 && qx[2] > 0)
+  
+  if (LogC) { 
+    gene_matrix2aux <- gene_matrix1
+    gene_matrix2aux[which(gene_matrix2aux <= 0)] <- NaN     # Eliminar valores negativos
+    gene_matrix2 <- log2(gene_matrix2aux)                   # Calcular log2
+    
+  } else {
+    gene_matrix2 <- gene_matrix1
+  }
+  
+
+}else {
+  gene_matrix2 <- gene_matrix1
+}
+
+not_gene_data2 <- not_gene_data1
+    
+# Almacenar en un dataframe
+dataset2 <- cbind( not_gene_data2, 
+                   gene_matrix2
+            )
+    
+# Reordenar columnas
+dataset2 <- dataset2 %>% 
+  dplyr::select(all_of(not_gene_columns), everything())
+```
+
+
+
+```{r}
+# Almacenar en csv y mostrar
+
+write_csv(dataset2, 
+          paste0(dataset_files_folder_preprocessing,
+                 dataset_name,"_2_log2data.csv")
+          )
+```
+
+
+
+```{r}
+# Previsualizacion de las primeras filas y columnas (4x4) del conjunto de datos en intensidades log2
+print(head(dataset2[,1:4], n=4), digits = 2, right = TRUE, numb = 4)
+```
+
+
+
+
+
+___
+
+# Filtrado de sondas con baja expresión 
+
+Durante el proceso de sumarización, resumimos bajo una misma característica (gen) los valores de varias sondas, utilizando como operación la media. Si al realizar esta media introducimos sondas con escasa variabilidad se produce un suavizado excesivo del valor final del gen. 
+
+Por ello, es habitual aplicar métodos para eliminar del conjunto aquellas sondas que presenten baja variabilidad. 
+
+Eliminamos sondas con bajo nivel de expresión ($log2 < 5$) o bien cuya variabilidad en la muestra de pacientes fuera baja ($log2MAX - log2MIN<1$). 
+
+```{r}
+# Filtrado para eliminar sondas con log2 < 5
+
+probeslog2_mean <- colMeans(gene_matrix2)
+probes_stay_log2mean <- abs(probeslog2_mean) >= 5
+
+
+# Filtrado para eliminar sondas con maxlog2 - minlog2 < 1
+
+probes_stay_log2minmax <- apply(gene_matrix2, 2, function(x) { abs(max(x) - min(x)) >= 1})
+
+
+# Imponemos ambos filtrados y filtramos las sondas
+
+probes_stay <- probes_stay_log2mean & probes_stay_log2minmax
+gene_matrix3 <- gene_matrix2[,probes_stay]
+
+
+# Almacenar las sondas con variabilidad en un dataset
+not_gene_data3 <- not_gene_data2
+dataset3 <- cbind(not_gene_data3, 
+                  gene_matrix3
+            )
+
+# Reordenar columnas
+dataset3 <- dataset3 %>% 
+      dplyr::select(all_of(not_gene_columns), everything())
+```
+
+```{r}
+# Almacenar en csv
+write_csv(dataset3, 
+          paste0(dataset_files_folder_preprocessing,
+                 dataset_name,"_3_filterprobes.csv")
+          )
+```
+
+```{r}
+# Mostrar los resultados
+
+cat("Numero de sondas inicial: ", dim(gene_matrix2)[2], "\n")
+cat("Numero de sondas tras filtrado de variabilidad: ", dim(gene_matrix3)[2], "\n")
+
+# Previsualizacion de las primeras filas y columnas (4x4) del conjunto de datos tras el filtro de variabilidad
+print(head(dataset3[,1:4], n=4), digits = 2, right = TRUE, numb = 4)
+```
+
+
+
+
+___
+
+# Corrección de ruido experimental
+
+En las mediciones del conjunto de datos pueden errores experimentales que introducen ruido sobre la variabilidad biológica (o real) y afecta a su detección. Buscamos reducir este ruido experimental para detectar mejor la variabilidad biológica mediante la normalización de los pacientes.
+
+```{r}
+# Grafico boxplot antes de la normalizacion
+par(mar=c(7,4,2,1))
+boxplot(t(gene_matrix2[1:nmax_boxplot,]), boxwex=0.7, notch=T, 
+        main=paste(dataset_name, "- Boxplot quantile distribution (before preprocess)"), 
+        xlab = "samples(patients)",
+        ylab = "expression value",
+        outline=FALSE, las=2) 
+
+# Grafico de densidades antes de la normalizacion
+plot(density(unlist(gene_matrix2[1,]), na.rm = TRUE), 
+     main = paste(dataset_name, "- probes intensities per patient (before preprocess)"), 
+     xlim = log2_xlim_before, ylim = log2_ylim_before,
+     xlab = "intensity",
+     ylab = "density"
+    )
+
+for(i in 2:nrow(gene_matrix2)){
+  lines(density(unlist(gene_matrix2[i,]), na.rm = TRUE), col = i)
+}
+
+# La variabilidad experimental es alta por lo que debemos normalizar
+```
+
+
+```{r}
+if (do_norm=="YES"){
+  # Aplicar normalizacion por cuantiles
+  gene_matrix4aux_t <- normalize.quantiles(
+    t(as.matrix(gene_matrix3)), copy=TRUE)
+  rownames(gene_matrix4aux_t) <- colnames(gene_matrix3)
+  gene_matrix4 <- t(gene_matrix4aux_t)
+  
+  # Grafico boxplot tras la normalizacion para ver que hemos reducido la variabilidad experimental
+  par(mar=c(7,4,2,1))
+  boxplot(t(gene_matrix4[1:nmax_boxplot,]), boxwex=0.7, notch=T, 
+        main=paste(dataset_name, "- Boxplot quantile distribution (after preprocess)"), 
+        xlab = "samples(patients)",
+        ylab = "expression value",
+        outline=FALSE, las=2)
+  
+  # Grafico de densidades tras la normalizacion para ver que hemos reducido la variabilidad experimental
+  plot(density(unlist(gene_matrix4[1,]), na.rm = TRUE), 
+     main = paste(dataset_name, "- probes intensities per patient (after preprocess)"), 
+     xlab = "intensity",
+     ylab = "density",
+     xlim = log2_xlim_after, ylim = log2_ylim_after
+     )
+
+for(i in 2:nrow(gene_matrix4)){
+  lines(density(unlist(gene_matrix4[i,]), na.rm = TRUE), col = i)
+}
+
+} else {
+  gene_matrix4 <- gene_matrix3
+}
+
+# Almacenar la normalización por cuantiles en un dataset
+not_gene_data4 <- not_gene_data3
+dataset4 <- cbind(not_gene_data4, 
+                  gene_matrix4
+            )
+
+# Reordenar columnas
+dataset4 <- dataset4 %>% 
+      dplyr::select(all_of(not_gene_columns), everything())
+```
+
+
+```{r}
+# Almacenar en csv
+write_csv(dataset4, 
+          paste0(dataset_files_folder_preprocessing,
+            dataset_name,"_4_normcuantiles.csv")
+          )
+
+write_csv(dataset4[,-which(names(dataset4) %in% not_gene_columns)],
+          paste0(dataset_files_folder_preprocessing,
+            dataset_name,"_4_normcuantiles_onlygene.csv")
+          )
+
+```
+
+
+```{r}
+# Mostrar los resultados
+
+# Previsualizacion de las primeras filas y columnas (4x4) del conjunto de datos tras la normalizacion de cuantiles
+print(head(dataset4[,1:4], n=4), digits = 2, right = TRUE, numb = 4)
+```
+
+
+
+___
+
+# Sumarización
+
+
+Los conjuntos de datos de microarray en crudo no nos proporcionan información sobre los genes, si no sobre sondas. Cada una de estas sondas asociadas a un gen y hay múltiples sondas asociadas a un mismo gen. 
+
+El proceso mediante el cuál transformamos las sondas a genes (variables de interés) se conoce como \textit{sumarización}.
+
+En ella, resumimos bajo la media las sondas que corresponden a un mismo gen. Al transformar los atributos en genes, tenemos las características tal y como nos interesa estudiarlas y, además, al unificar valores se reduce la dimensión del problema. 
+
+En primer lugar, debemos de obtener una tabla de equivalencias sonda-gen. Esta equivalencia dependerá del tipo de plataforma de microarray utilizada durante el ensayo de laboratorio. Utilizando las herramientas de anotación de Bioconductor construimos una tabla de dos columnas, donde la primera indica la sonda y la segunda el gen asociado y almacenamos dicha tabla en un fichero .txt. 
+
+```{r warning=FALSE, results='hide', message=FALSE}
+# Tabla de equivalencias sonda gen para la plataforma de microarray utilizada
+
+# Nombres de las sondas medidas
+probes <- colnames(dataset4[,-which(names(dataset4) %in% not_gene_columns)])
+
+# Extraer la notacion gene symbol a partir de las sondas
+platform_db <- get(microarray_platform)
+gene_symbols <- select(platform_db, keys = probes, columns = "SYMBOL", keytype = "PROBEID")
+colnames(gene_symbols) <- c("From", "To")
+gene_symbols$To <- sapply(strsplit(gene_symbols$To, "-"), "[", 1)
+```
+
+```{r}
+# Guardar la equivalencia
+write.table(gene_symbols, 
+            file = paste0(dataset_files_folder_preprocessing,
+              dataset_name,"_table_nomenclature.txt"), 
+            sep = "\t", 
+            row.names = FALSE) 
+
+# Ver la equivalencia sonda-gene symbol
+# Previsualizacion de la tabla de equivalencias sonda-gen
+print(tail(gene_symbols,10))
+```
+
+
+Una vez hecho esto bastaría llamar a un script Python que hemos desarrollado, pasándole el fichero fuente de datos, la tabla de equivalencias y el fichero destino. El script resume bajo la media las sondas de un mismo gen, sirviéndose de una clase auxiliar llamada \textit{Gene Nomenclature}. Por último, cabe resaltar que este script está optimizado con \textit{Numba}, para llevar a cabo de forma eficiente la sumarización (debido a la alta dimensionalidad).
+
+
+```{r,results='hide', warning=FALSE, message=FALSE}
+# Llamar al script de Python desde R 
+file_source <- paste0(dataset_files_folder_preprocessing,
+  dataset_name,"_4_normcuantiles_onlygene.csv"
+  )
+file_destination <- paste0(dataset_files_folder_preprocessing,
+  dataset_name,"_5_sum_onlygene.csv")
+file_nomenclature <- paste0(dataset_files_folder_preprocessing,
+  dataset_name,"_table_nomenclature.txt")
+
+comando <- paste("python", "../sumarizacion_sondas.py", file_source, file_destination, file_nomenclature)
+system(comando)
+```
+
+
+
+```{r}
+# Almacenar los datos en un dataframe
+gene_matrix5 <- read_csv(
+  paste0(dataset_files_folder_preprocessing, dataset_name,"_5_sum_onlygene.csv"),  
+  show_col_types = FALSE)
+
+not_gene_data5 <- not_gene_data4
+
+dataset5 <- cbind(not_gene_data5, 
+                  gene_matrix5
+            )
+
+# Reordenar columnas
+dataset5 <- dataset5 %>% 
+      dplyr::select(all_of(not_gene_columns), everything())
+```
+
+
+
+```{r}
+# Mostrar los resultados
+
+cat("Numero de sondas antes de la sumarizacion: ", dim(gene_matrix4)[2], "\n")
+cat("Numero de genes tras la sumarizacion: ", dim(gene_matrix5)[2], "\n")
+
+# Previsualizacion del dataset tras la sumarizacion
+print(head(dataset5[,1:4], n=4), digits = 2, right = TRUE, numb = 4)
+```
+
+
+```{r}
+# Almacenar en csv
+write_csv(dataset5, paste0(dataset_files_folder_preprocessing,
+  dataset_name,"_5_sum.csv")
+  )
+```
+
+
+___
+
+# Análisis diferencial
+
+El análisis de expresión diferencial es un punto clave del preprocesamiento computacional. Consiste en identificar qué genes muestran cambios significativos en sus niveles de expresión bajo diferentes grupos biológicos. Para ello seguimos los siguientes pasos.
+
+Identificación de los grupos de estudio (Tumor:1, Normal:0) y creación de una matriz de diseño asociando cada muestras con su clase.
+```{r}
+# Matriz de diseño y de contraste
+
+#  Creamos 2 grupos o niveles
+groupsfactor <- as.factor(dataset5[,c("group")])
+groups <- make.names(c("test","control"))
+levels(groupsfactor) <- groups
+
+# Matriz de diseno, introduciendo variables dummy
+design_matrix <- model.matrix(~ -1 + groupsfactor)
+colnames(design_matrix) <- levels(groupsfactor)
+
+# Previsualizacion de la matriz de diseño
+print(head(design_matrix))
+```
+
+Ajustamos un modelo lineal y definimos el contraste a plantear: diferencia de expresión entre el grupo 1 y el grupo 0, ya que lo que nos interesa es obtener evidencia estadística de que la diferencia entre los dos grupos es no nula para ciertos genes.
+
+A partir de este contraste, ajustamos el modelo lineal y, mediante el método de bayes empírico verificaremos para qué genes hay evidencia estadística que diferenciación entre los dos grupos.
+
+```{r, results='hide', warning=FALSE, message=FALSE}
+# Ajustamos el modelo lineal
+fit <- lmFit(t(gene_matrix5), design_matrix)
+
+# Definimos el contraste: diferencia entre grupos
+contrast_matrix <- makeContrasts(
+  Diff = test - control,
+  levels = design_matrix
+)
+contrast_matrix
+
+# Ajustamos el modelo lineal para el contraste
+fit2 <- contrasts.fit(fit, contrast_matrix)
+
+# Aplicamos el metodo de Bayes empirico
+fit3 <- eBayes(fit2)
+```
+
+
+Tablas de decisión para identificar genes expresados: up, down or not-significative.
+
+```{r}
+# Decidimos que genes estan diferencialmente expresados
+dT <- decideTests(fit3, adjust.method="fdr", p.value=0.05, return='integer')
+
+dT_vector <- as.vector(dT)
+
+dT_df <- data.frame(
+  diffExp = dT_vector,
+  row.names = row.names(dT)
+)
+
+
+# Previsualizacion de cuantos genes se expresan
+print(summary(dT))
+```
+
+
+```{r}
+# Seleccionamos los genes diferencialmente expresados y filtramos los demas, construimos el dataframe
+selected_columns <-  c(rep(TRUE, times=length(not_gene_columns)), ifelse(dT_vector==0, FALSE, TRUE))
+    # seleccionar todas las caracteristicas y de los genes los diferencialmente expresados
+
+dataset6 <- dataset5[, selected_columns]
+gene_matrix6 <- dataset6[,-which(names(dataset6) %in% not_gene_columns)]
+not_gene_data6 <- not_gene_data5
+
+# Mostrar resultados
+cat("Numero de genes antes del analisis diferencial: ", dim(gene_matrix5)[2], "\n")
+cat("Numero de genes antes del analisis diferencial: ", dim(gene_matrix6)[2], "\n")
+
+# Previsualizacion del dataset tras el analisis diferencial
+print(head(dataset6[,1:4], n=4), digits = 2, right = TRUE, numb = 4)
+```
+
+```{r,warning=FALSE}
+# Almacenamos cada gen junto con informacion sobre su expresion
+write_csv(dT_df, file=paste0(dataset_files_folder_preprocessing,
+  dataset_name,"_6_diffexp_decission.csv")
+  )
+
+write_csv(dataset6, file=paste0(dataset_files_folder_preprocessing,
+  dataset_name,"_6_diffexp.csv")
+  )
+```
+
+
+```{r, warning=FALSE}
+# Graficamos los resultados
+
+# Volcano plot 
+colores <- ifelse(dT_vector == 0, "black", ifelse(dT_vector == 1, "red", "blue"))
+
+volcanoplot(fit3, coef=1, 
+            col=colores,
+            main=paste(dataset_name,"- VolcanoPlot"),
+            ph=20, cex = volcano_cex, xlim=volcano_xlim, ylim=volcano_ylim
+            )
+legend(volcano_legend, pch=20,
+       col=c("black","red","blue"),
+       legend=c("Not significative", "Upregulated", "Downregulated")
+       )
+
+# MD plot
+plotMD(fit2, column=1, legend=FALSE,
+       status=dT[,1],
+       main=paste(dataset_name,"- MDPlot"),
+       pch=20, cex=md_cex, xlim=md_xlim, ylim=md_ylim
+       )
+abline(h=0)
+legend(md_legend, pch=20,
+       col=c("black","red","blue"),
+       legend=c("Not significative", "Upregulated", "Downregulated")
+       )
+```
+
+
+___
+
+# Nivel de dificultad del problema
+
+Vamos a proyectar el problema en dos dimensiones para ver como de diferenciadas están las clases utilizando la librería umap.
+
+```{r}
+umap_result <- umap(gene_matrix6, n_neighbors = 15, random_state = 42)
+group_vector <- as.factor(ifelse(dataset6$group==0, groupv0, groupv1))
+
+umap_df <- data.frame(
+  u1 = umap_result$layout[, 1],
+  u2 = umap_result$layout[, 2],
+  group = as.factor(group_vector)
+  )
+
+plot(x=umap_df$u1, y=umap_df$u2,
+     col = ifelse(dataset6$group==0, "purple", "orange"),
+     pch = 20, cex=umap_cex,
+     xlab="u1", ylab="u2", main=paste(dataset_name,"- UMAP")
+     )
+legend(umap_legend, legend = unique(umap_df$group),
+       title = "clases",
+       col = c("purple", "orange"),
+       pch = 20
+       )
+```
+___
