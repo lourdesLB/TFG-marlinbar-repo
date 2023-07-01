@@ -1,0 +1,15 @@
+tidyverse=2.0.0
+umap=0.2.10.0
+
+FOCI=0.1.3
+arules=1.7-6
+arulesViz=1.5-2
+igraph=1.4.2
+
+BiocManager=1.30.21
+cancerclass=1.38.0
+GEOquery=2.62.2
+preprocessCore=1.56.0
+limma=3.50.3
+hgu133plus2.db=3.13.0
+hgu95av2.db=3.13.0
