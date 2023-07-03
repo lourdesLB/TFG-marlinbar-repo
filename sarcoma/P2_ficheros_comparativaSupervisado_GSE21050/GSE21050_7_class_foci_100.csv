@@ -1,7 +1,7 @@
 ,Best params,Best score
-LR,"{'penalty': 'l2', 'C': 0.1, 'solver': 'liblinear'}",0.6948476052249637
-KNN,"{'n_neighbors': 6, 'weights': 'uniform', 'metric': 'manhattan'}",0.6983309143686502
-SVC,"{'kernel': 'sigmoid', 'C': 100, 'gamma': 0.001}",0.6985486211901306
-NuSVC,"{'kernel': 'rbf', 'gamma': 0.1, 'nu': 0.5}",0.7062409288824384
-RF,"{'n_estimators': 20, 'max_depth': 10}",0.6947750362844702
-XGB,"{'n_estimators': 20, 'max_depth': 5, 'learning_rate': 0.1}",0.7060232220609579
+LR,"{'penalty': 'l2', 'C': 1, 'solver': 'liblinear'}",0.7252539912917272
+KNN,"{'n_neighbors': 50, 'weights': 'distance', 'metric': 'euclidean'}",0.6951378809869375
+SVC,"{'kernel': 'sigmoid', 'C': 100, 'gamma': 0.001}",0.7100145137880987
+NuSVC,"{'kernel': 'rbf', 'gamma': 0.1, 'nu': 0.5}",0.7063134978229318
+RF,"{'n_estimators': 100, 'max_depth': 5}",0.7062409288824383
+XGB,"{'n_estimators': 20, 'max_depth': 10, 'learning_rate': 0.3}",0.6949201741654571
